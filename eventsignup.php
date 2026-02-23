@@ -12,7 +12,7 @@ function eventsignup_info() {
     return array(
         "name"          => "Troop Roster (Clean Version)",
         "description"   => "Roster with POC handoff. Archiving is handled by archive_troop.php.",
-        "author"        => "Gemini",
+        "author"        => "Brendan - ST84218",
         "version"       => "12.3",
         "codename"      => "eventsignup",
         "compatibility" => "18*"
