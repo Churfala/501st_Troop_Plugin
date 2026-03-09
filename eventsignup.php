@@ -71,11 +71,6 @@ function eventsignup_postbit(&$post) {
                 $info1 = trim($mybb->get_input('s_info1'));
                 $info2 = trim($mybb->get_input('s_info2'));
 
-                if($info1 === '') {
-                    redirect("showthread.php?tid=$tid", "Please enter a costume.");
-                    return;
-                }
-
                 $is_poc = (int)$mybb->get_input('s_poc');
 
                 // If claiming POC, clear any existing POC flags for this thread first
@@ -182,8 +177,8 @@ function eventsignup_postbit(&$post) {
                     style='display:none; margin-top:10px; padding:15px; border:1px solid #444; background:#111;'>
                     <input type='hidden' name='my_post_key' value='{$mybb->post_code}'/>
                     <div style='margin-bottom:10px;'>
-                        <input type='text' name='s_info1' placeholder='Costume (required)'
-                            class='textbox' style='width:95%;' required />
+                        <input type='text' name='s_info1' placeholder='Costume'
+                            class='textbox' style='width:95%;' />
                     </div>
                     <div style='margin-bottom:10px;'>
                         <textarea name='s_info2' placeholder='Notes'
