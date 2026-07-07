@@ -18,9 +18,9 @@ $plugins->add_hook("postbit", "eventsignup_postbit_stars");
 function eventsignup_info() {
     return array(
         "name"          => "Troop Roster (Clean Version)",
-        "description"   => "Roster with POC handoff. Archiving is handled by archive_troop.php.",
+        "description"   => "Roster with POC handoff and ICS calendar download. Archiving is handled by archive_troop.php.",
         "author"        => "Brendan - ST84218",
-        "version"       => "12.4",
+        "version"       => "12.5",
         "codename"      => "eventsignup",
         "compatibility" => "18*"
     );
@@ -51,6 +51,113 @@ function eventsignup_uninstall() {
     if($db->table_exists("signup_sheets")) {
         $db->drop_table("signup_sheets");
     }
+}
+
+/**
+ * Extract event date/time/location from the mybb_bridge's first-post text.
+ * The bridge always writes plain "Label: value" lines (see outpost42-mybb-bridge.php).
+ */
+function eventsignup_parse_event_meta($message) {
+    $text = preg_replace('/<br\s*\/?>/i', "\n", $message);
+    $text = strip_tags($text);
+    $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
+
+    $get = function($label) use ($text) {
+        if(preg_match('/^\s*' . preg_quote($label, '/') . ':\s*([^\r\n]+)/im', $text, $m)) {
+            return trim($m[1]);
+        }
+        return '';
+    };
+
+    $event_name = $get('Event Name');
+    $event_date = $get('Date');
+    $start_time = $get('Start Time');
+    $end_time   = $get('End Time');
+    $venue      = $get('Venue Address');
+    $city       = $get('City');
+
+    if($event_date === '') return false;
+
+    // Slash dates are day-first here (NZ), but strtotime() reads them as
+    // US month-first — rewrite d/m/y to ISO before parsing.
+    if(preg_match('#^(\d{1,2})/(\d{1,2})/(\d{2,4})$#', $event_date, $m)) {
+        $year = (strlen($m[3]) === 2) ? '20' . $m[3] : $m[3];
+        $event_date = sprintf('%s-%02d-%02d', $year, $m[2], $m[1]);
+    }
+
+    $date_ts = strtotime($event_date);
+    if($date_ts === false) return false;
+
+    // Times like ": " (empty form fields) won't parse — fall back to all-day
+    $start_ts = strtotime(trim($event_date . ' ' . $start_time));
+    if(!preg_match('/\d/', $start_time) || $start_ts === false) {
+        return array(
+            'name'     => ($event_name !== '') ? $event_name : 'Troop Event',
+            'allday'   => true,
+            'start'    => $date_ts,
+            'end'      => $date_ts,
+            'location' => trim($venue . ($city !== '' ? ', ' . $city : ''), ', '),
+        );
+    }
+
+    $end_ts = ($end_time !== '') ? strtotime(trim($event_date . ' ' . $end_time)) : false;
+    if($end_ts === false || $end_ts <= $start_ts) {
+        $end_ts = $start_ts + (2 * 3600); // default 2-hour block
+    }
+
+    return array(
+        'name'     => ($event_name !== '') ? $event_name : 'Troop Event',
+        'allday'   => false,
+        'start'    => $start_ts,
+        'end'      => $end_ts,
+        'location' => trim($venue . ($city !== '' ? ', ' . $city : ''), ', '),
+    );
+}
+
+/**
+ * Escape a string per RFC5545 TEXT value rules.
+ */
+function eventsignup_ics_escape($str) {
+    $str = str_replace(array("\\", ",", ";"), array("\\\\", "\\,", "\\;"), $str);
+    $str = preg_replace('/\r\n|\r|\n/', '\\n', $str);
+    return $str;
+}
+
+/**
+ * Build an RFC5545 .ics file. Times are emitted as floating local time
+ * (no Z / TZID) since the garrison operates in a single timezone.
+ */
+function eventsignup_build_ics($event, $tid) {
+    $lines = array(
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//501st NZ//Troop Roster//EN',
+        'CALSCALE:GREGORIAN',
+        'BEGIN:VEVENT',
+        'UID:troop-' . (int)$tid . '@501st.nz',
+        'DTSTAMP:' . gmdate('Ymd\THis\Z'),
+    );
+
+    if(!empty($event['allday'])) {
+        // All-day events use date-only values; DTEND is exclusive (next day)
+        $lines[] = 'DTSTART;VALUE=DATE:' . date('Ymd', $event['start']);
+        $lines[] = 'DTEND;VALUE=DATE:' . date('Ymd', $event['end'] + 86400);
+    } else {
+        $lines[] = 'DTSTART:' . date('Ymd\THis', $event['start']);
+        $lines[] = 'DTEND:' . date('Ymd\THis', $event['end']);
+    }
+
+    $lines[] = 'SUMMARY:' . eventsignup_ics_escape($event['name']);
+
+    if($event['location'] !== '') {
+        $lines[] = 'LOCATION:' . eventsignup_ics_escape($event['location']);
+    }
+
+    $lines[] = 'DESCRIPTION:' . eventsignup_ics_escape('501st NZ Troop Event - see the forum thread for the roster and details.');
+    $lines[] = 'END:VEVENT';
+    $lines[] = 'END:VCALENDAR';
+
+    return implode("\r\n", $lines);
 }
 
 function eventsignup_postbit(&$post) {
@@ -193,13 +300,30 @@ function eventsignup_postbit(&$post) {
         }
     }
 
+    // --- CALENDAR DOWNLOAD ---
+    $ics_button = "";
+    $event_meta = eventsignup_parse_event_meta($post['message']);
+    if($event_meta !== false) {
+        $ics_content  = eventsignup_build_ics($event_meta, $tid);
+        $ics_filename = preg_replace('/[^A-Za-z0-9_\-]+/', '_', $event_meta['name']) . '.ics';
+        $ics_button   = "<a href='data:text/calendar;charset=utf-8;base64," . base64_encode($ics_content) . "'
+            download='{$ics_filename}' class='button'
+            title='Downloads a calendar file that opens in Google, Apple or Outlook calendars'
+            style='background:#2a6f2a; color:#fff; border:1px solid #1f4f1f;
+                   padding:6px 12px; text-decoration:none; font-size:12px;
+                   border-radius:3px; font-weight:bold; display:inline-block;'>
+            &#128197; Add to Calendar
+        </a>";
+    }
+
     // --- RENDER ---
     $empty_row = "<tr><td colspan='4' class='trow1' align='center'>No signups yet.</td></tr>";
 
     $roster_html = "
     <div class='tborder' style='margin-top:30px; border:1px solid #444; background:#222;'>
-        <div class='thead' style='padding:10px;'>
+        <div class='thead' style='padding:10px; display:flex; justify-content:space-between; align-items:center;'>
             <strong>Troop Roster (Total: {$count})</strong>
+            {$ics_button}
         </div>
         <table width='100%' cellspacing='0'>
             <tr class='tcat'>
